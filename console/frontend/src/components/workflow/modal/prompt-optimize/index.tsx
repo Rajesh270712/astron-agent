@@ -25,6 +25,7 @@ function PromptModal(): React.ReactElement {
   );
   const textQueue = useRef<string[]>([]);
   const wsMessageStatus = useRef<string>('end');
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [optimizationPrompt, setOptimizationPrompt] = useState<string>('');
   const [isReciving, setIsReciving] = useState<boolean>(true);
   const { handleChangeNodeParam, currentNode } = useNodeCommon({
@@ -38,12 +39,29 @@ function PromptModal(): React.ReactElement {
     promptData && handlePromptOptimization();
   }, [promptData]);
 
+  // Cleanup: abort request on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
+
   const handlePromptOptimization = useMemoizedFn(() => {
+    // Abort previous request if it exists
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
     setOptimizationPrompt(() => '');
     wsMessageStatus.current = 'start';
     setIsReciving(true);
     const url = getFixedUrl('/prompt/enhance');
     const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     fetchEventSource(url, {
       openWhenHidden: true,
       method: 'POST',
@@ -109,6 +127,12 @@ function PromptModal(): React.ReactElement {
   }, [optimizationPrompt, isReciving]);
 
   const handleOk = useMemoizedFn(() => {
+    // Abort ongoing request when closing modal
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
     setPromptOptimizeModalInfo({ open: false, nodeId: '', key: '' });
     handleChangeNodeParam((data, value) => {
       if (data.nodeParam && promptOptimizeModalInfo?.key) {
@@ -186,13 +210,18 @@ function PromptModal(): React.ReactElement {
                   <Button
                     type="text"
                     className="origin-btn px-6"
-                    onClick={() =>
+                    onClick={() => {
+                      // Abort ongoing request when canceling
+                      if (abortControllerRef.current) {
+                        abortControllerRef.current.abort();
+                        abortControllerRef.current = null;
+                      }
                       setPromptOptimizeModalInfo({
                         open: false,
                         nodeId: '',
                         key: '',
-                      })
-                    }
+                      });
+                    }}
                   >
                     取消
                   </Button>
