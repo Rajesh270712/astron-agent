@@ -16,19 +16,29 @@ function OpeningRemarksModal({
 }): React.ReactElement {
   const textQueue = useRef<string[]>([]);
   const wsMessageStatus = useRef<string>('end');
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [optimizationOpeningRemarks, setOptimizationOpeningRemarks] =
     useState('');
   const [isReciving, setIsReciving] = useState(true);
 
   useEffect(() => {
     currentRobot.id && handlePromptOptimization();
+
+    // Cleanup on unmount
+    return () => {
+      abortControllerRef.current?.abort();
+    };
   }, [currentRobot]);
 
   function handlePromptOptimization(): void {
+    // Abort previous request if exists
+    abortControllerRef.current?.abort();
+
     setOptimizationOpeningRemarks(() => '');
     wsMessageStatus.current = 'start';
     setIsReciving(true);
     const controller = new AbortController();
+    abortControllerRef.current = controller;
     fetchEventSource(getFixedUrl('/prompt/ai-generate'), {
       openWhenHidden: true,
       method: 'POST',
@@ -90,6 +100,7 @@ function OpeningRemarksModal({
   }, [optimizationOpeningRemarks, isReciving]);
 
   function handleOk(): void {
+    abortControllerRef.current?.abort();
     setOpeningRemarksModal(false);
     setConversationStarter(optimizationOpeningRemarks);
   }
@@ -145,7 +156,10 @@ function OpeningRemarksModal({
           <Button
             type="text"
             className="origin-btn px-[24px]"
-            onClick={() => setOpeningRemarksModal(false)}
+            onClick={() => {
+              abortControllerRef.current?.abort();
+              setOpeningRemarksModal(false);
+            }}
           >
             取消
           </Button>

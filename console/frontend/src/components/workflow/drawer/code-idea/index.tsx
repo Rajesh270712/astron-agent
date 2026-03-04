@@ -140,6 +140,7 @@ const useAICodeInputBox = ({
   textQueue,
 }): useAICodeInputBoxProps => {
   const { t } = useTranslation();
+  const abortControllerRef = useRef<AbortController | null>(null);
   const extractInputs = useMemoizedFn((functionString: string): string[] => {
     const pattern = /\((.*?)\)/;
     const match = functionString.match(pattern);
@@ -162,7 +163,12 @@ const useAICodeInputBox = ({
   const handleAiCode = useMemoizedFn(
     (inputPrompt?: string, codeRevision = false): void => {
       if (isReciving) return;
+
+      // Abort previous request if exists
+      abortControllerRef.current?.abort();
+
       const controller = new AbortController();
+      abortControllerRef.current = controller;
       const vars = extractInputs(value || '');
       const params: AICodeParams = {
         code: value || '',
@@ -216,9 +222,18 @@ const useAICodeInputBox = ({
     }
     handleAiCode();
   });
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
   return {
     handleAiCode,
     handleSendMessage,
+    abortControllerRef,
   };
 };
 
@@ -243,7 +258,7 @@ const AICodeInputBox = ({
   textQueue,
 }): React.ReactElement => {
   const { t } = useTranslation();
-  const { handleAiCode, handleSendMessage } = useAICodeInputBox({
+  const { handleAiCode, handleSendMessage, abortControllerRef } = useAICodeInputBox({
     value,
     inputs,
     isReciving,
@@ -301,6 +316,7 @@ const AICodeInputBox = ({
           className="w-3 h-3 cursor-pointer absolute top-2 right-4"
           alt=""
           onClick={() => {
+            abortControllerRef.current?.abort();
             setAiCodeInputShow(false);
             handleChangeNodeParam(
               (data, value) => (data.nodeParam.code = value),
@@ -330,6 +346,7 @@ const AICodeInputBox = ({
               <div
                 className="bg-[#383c43] px-[36px] rounded-lg cursor-pointer hover:text-[#fff] hover:bg-[#5b696a]"
                 onClick={() => {
+                  abortControllerRef.current?.abort();
                   setAiCodeInputShow(false);
                   setGenerateAIcode(false);
                 }}
@@ -339,6 +356,7 @@ const AICodeInputBox = ({
               <div
                 className="bg-[#383c43] px-[36px] rounded-lg cursor-pointer hover:text-[#fff] hover:bg-[#5b696a]"
                 onClick={() => {
+                  abortControllerRef.current?.abort();
                   handleChangeNodeParam(
                     (data, value) => (data.nodeParam.code = value),
                     temporaryStorageCode.current
