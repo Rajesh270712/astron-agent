@@ -65,6 +65,7 @@ function index() {
   const [operationId, setOperationId] = useState<string | null>(null);
   const { spaceId } = useSpaceStore();
   const { handleToChat } = useChat();
+  const [inputsTypeMap, setInputsTypeMap] = useState<Record<number, any[]>>({});
 
   // 复制成虚拟人需要的参数
   const [copyParams, setCopyParams] = useState<any>({});
@@ -109,6 +110,18 @@ function index() {
   useEffect(() => {
     getRobots();
   }, [status, sort, version, spaceId]);
+
+  // Fetch inputs type for workflow agents
+  useEffect(() => {
+    const workflowAgents = robots.filter((k: any) => k.version === 3);
+    workflowAgents.forEach((agent: any) => {
+      if (!inputsTypeMap[agent.botId]) {
+        getInputsType({ botId: agent.botId }).then((res: any) => {
+          setInputsTypeMap(prev => ({ ...prev, [agent.botId]: res }));
+        });
+      }
+    });
+  }, [robots]);
 
   function getRobots(value?: string): void {
     loading.current = true;
@@ -495,22 +508,36 @@ function index() {
                         </div>
                       </span>
                       <div className="flex items-center text-desc flex-1 max-w-[200px] justify-between">
-                        <div
-                          className="card-chat cursor-pointer flex justify-center items-center"
-                          style={{
-                            width: '76px',
-                            height: '32px',
-                            background: '#F1F0FF',
-                            borderRadius: '6px',
-                            textAlign: 'center',
-                          }}
-                          onClick={e => {
-                            e.stopPropagation();
-                            if (k.version === 3) {
-                              getInputsType({ botId: k.botId }).then(
-                                (res: any) => {
-                                  // 合并不支持对话的条件
+                        {(() => {
+                          const inputs = inputsTypeMap[k.botId];
+                          const isDisabled =
+                            k.version === 3 &&
+                            inputs &&
+                            inputs.length > 1 &&
+                            inputs
+                              .slice(1)
+                              .some(
+                                (item: { fileType?: string }) =>
+                                  item.fileType !== 'file'
+                              );
+
+                          const chatButton = (
+                            <div
+                              className={`card-chat flex justify-center items-center ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                              style={{
+                                width: '76px',
+                                height: '32px',
+                                background: '#F1F0FF',
+                                borderRadius: '6px',
+                                textAlign: 'center',
+                              }}
+                              onClick={e => {
+                                e.stopPropagation();
+                                if (isDisabled) return;
+                                if (k.version === 3) {
+                                  const res = inputsTypeMap[k.botId];
                                   if (
+                                    res &&
                                     res.length > 1 &&
                                     res
                                       .slice(1)
@@ -524,24 +551,34 @@ function index() {
                                     );
                                   }
                                   handleToChat(k.botId);
+                                } else {
+                                  handleToChat(k.botId);
                                 }
-                              );
-                            } else {
-                              handleToChat(k.botId);
-                            }
-                          }}
-                        >
-                          <img src={chatIcon} alt="" />
-                          <span
-                            className="ml-1 whitespace-nowrap"
-                            style={{
-                              color: '#222529',
-                              fontSize: '14px',
-                            }}
-                          >
-                            {t('agentPage.agentPage.chat')}
-                          </span>
-                        </div>
+                              }}
+                            >
+                              <img src={chatIcon} alt="" />
+                              <span
+                                className="ml-1 whitespace-nowrap"
+                                style={{
+                                  color: '#222529',
+                                  fontSize: '14px',
+                                }}
+                              >
+                                {t('agentPage.agentPage.chat')}
+                              </span>
+                            </div>
+                          );
+
+                          return isDisabled ? (
+                            <Tooltip
+                              title={t('agentPage.agentPage.multipleInputsTooltip')}
+                            >
+                              {chatButton}
+                            </Tooltip>
+                          ) : (
+                            chatButton
+                          );
+                        })()}
                         <Popover
                           placement="bottom"
                           overlayClassName="my-botlist-share-pop"
