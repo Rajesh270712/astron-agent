@@ -1,10 +1,12 @@
-"""A2A discovery adapter for the core agent service."""
+"""A2A protocol adapter for the core agent service."""
 
+import json
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, TypeAlias
+from typing import Annotated, Any, TypeAlias
 
+from common.otlp.trace.span import Span
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from agent.api.schemas.a2a import (
@@ -14,11 +16,14 @@ from agent.api.schemas.a2a import (
     A2AAgentProvider,
     A2AAgentSkill,
     A2AAPIKeySecurityScheme,
+    A2AArtifact,
     A2AAuthentication,
     A2AMessage,
     A2APart,
     A2ASecurityRequirement,
     A2ASecurityScheme,
+    A2ASendMessageRequest,
+    A2ASendMessageResponse,
     A2AStringList,
     A2ATask,
     A2ATaskArtifactUpdateEvent,
@@ -28,6 +33,9 @@ from agent.api.schemas.a2a import (
     A2ATaskStatus,
     A2ATaskStatusUpdateEvent,
 )
+from agent.api.schemas.llm_message import LLMMessage
+from agent.api.schemas.workflow_agent_inputs import CustomCompletionInputs
+from agent.api.v1.workflow_agent import CustomChatCompletion
 
 A2A_PROTOCOL_VERSION = "0.3.0"
 ASTRON_AGENT_VERSION = "1.0.9"
@@ -141,6 +149,93 @@ async def get_agent_card() -> A2AAgentCard:
     return build_agent_card()
 
 
+def extract_message_text(message: A2AMessage) -> str:
+    """Return the text content from a client A2A message."""
+
+    if message.role not in {"ROLE_USER", "user"}:
+        raise HTTPException(status_code=400, detail="A2A message role must be user")
+
+    text_parts = [part.text.strip() for part in message.parts if part.text]
+    text = "\n".join(part for part in text_parts if part)
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="A2A message must include at least one non-empty text part",
+        )
+    return text
+
+
+def _metadata_string(metadata: dict[str, Any], key: str, default: str = "") -> str:
+    value = metadata.get(key, default)
+    return value if isinstance(value, str) else default
+
+
+def _metadata_mapping(metadata: dict[str, Any], key: str) -> dict[str, Any]:
+    value = metadata.get(key, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_loop_count(metadata: dict[str, Any]) -> int:
+    parsed_metadata = _optional_int(metadata.get("max_loop_count"))
+    if parsed_metadata is not None:
+        return parsed_metadata
+
+    parsed_env = _optional_int(os.getenv("A2A_MAX_LOOP_COUNT"))
+    if parsed_env is not None:
+        return parsed_env
+
+    return 5
+
+
+def _request_uid(request: A2ASendMessageRequest, metadata: dict[str, Any]) -> str:
+    return (
+        _metadata_string(metadata, "uid")
+        or _metadata_string(request.message.metadata, "uid")
+        or request.message.context_id
+        or request.message.message_id
+        or request.message.task_id
+        or str(uuid.uuid4())
+    )[:64]
+
+
+def _completion_inputs_from_a2a(
+    request: A2ASendMessageRequest,
+    text: str,
+) -> CustomCompletionInputs:
+    metadata = request.metadata
+    model_config = {
+        "domain": os.getenv("A2A_MODEL_DOMAIN", ""),
+        "api": os.getenv("A2A_MODEL_API", ""),
+        "provider": os.getenv("A2A_MODEL_PROVIDER", ""),
+        "api_key": os.getenv("A2A_MODEL_API_KEY", ""),
+    }
+    model_config.update(_metadata_mapping(metadata, "model_config"))
+
+    return CustomCompletionInputs(
+        uid=_request_uid(request, metadata),
+        messages=[LLMMessage(role="user", content=text)],
+        stream=False,
+        meta_data={
+            "caller": "a2a_http_json",
+            "caller_sid": request.message.message_id,
+            "workflow_id": _metadata_string(metadata, "workflow_id"),
+            "run_id": request.message.task_id,
+            "node_id": _metadata_string(metadata, "node_id"),
+        },
+        model_config=model_config,
+        instruction=_metadata_mapping(metadata, "instruction"),
+        plugin=_metadata_mapping(metadata, "plugin"),
+        max_loop_count=_max_loop_count(metadata),
+    )
+
+
 def _history_message(
     message: A2AMessage,
     task_id: str,
@@ -165,37 +260,51 @@ def _status_message(task_id: str, context_id: str, text: str) -> A2AMessage:
     )
 
 
-def _submitted_task_from_params(params: A2ATaskSendParams) -> A2ATask:
-    task_id = params.id or params.message.task_id or str(uuid.uuid4())
-    context_id = (
-        params.context_id
-        or params.session_id
-        or params.message.context_id
-        or str(uuid.uuid4())
-    )
-    return A2ATask(
-        id=task_id,
-        contextId=context_id,
-        status=A2ATaskStatus(
-            state="TASK_STATE_SUBMITTED",
-            message=_status_message(
-                task_id,
-                context_id,
-                "A2A task submitted to Astron Agent.",
-            ),
-            timestamp=_utc_now(),
-        ),
-        history=[
-            _history_message(
-                params.message,
-                task_id=task_id,
-                context_id=context_id,
+def _task_response(
+    request: A2ASendMessageRequest,
+    state: str,
+    output_text: str = "",
+    error_text: str = "",
+) -> A2ASendMessageResponse:
+    task_id = request.message.task_id or str(uuid.uuid4())
+    context_id = request.message.context_id or str(uuid.uuid4())
+    history = [
+        _history_message(
+            request.message,
+            task_id=task_id,
+            context_id=context_id,
+        )
+    ]
+    artifacts: list[A2AArtifact] = []
+    status_message = None
+
+    if state == "TASK_STATE_COMPLETED":
+        artifacts.append(
+            A2AArtifact(
+                artifactId=str(uuid.uuid4()),
+                name="result",
+                parts=[A2APart(text=output_text, mediaType="text/plain")],
             )
-        ],
-        metadata={
-            "source": "astron-agent-core",
-            "tenant": params.tenant,
-        },
+        )
+    elif error_text:
+        status_message = _status_message(task_id, context_id, error_text)
+
+    return A2ASendMessageResponse(
+        task=A2ATask(
+            id=task_id,
+            contextId=context_id,
+            status=A2ATaskStatus(
+                state=state,
+                message=status_message,
+                timestamp=_utc_now(),
+            ),
+            artifacts=artifacts,
+            history=history,
+            metadata={
+                "source": "astron-agent-core",
+                "tenant": request.tenant,
+            },
+        )
     )
 
 
@@ -225,6 +334,109 @@ def _record_task(task: A2ATask) -> None:
     _TASK_EVENTS[task.id] = events
 
 
+def _stored_response(response: A2ASendMessageResponse) -> A2ASendMessageResponse:
+    if response.task is not None:
+        _record_task(response.task)
+    return response
+
+
+def _request_from_task_send_params(
+    params: A2ATaskSendParams,
+) -> A2ASendMessageRequest:
+    task_id = params.id or params.message.task_id
+    context_id = params.context_id or params.session_id or params.message.context_id
+    message = params.message.model_copy(
+        update={
+            "task_id": task_id,
+            "context_id": context_id,
+        }
+    )
+    return A2ASendMessageRequest(
+        tenant=params.tenant,
+        message=message,
+        configuration=params.configuration,
+        metadata=params.metadata,
+    )
+
+
+def _parse_sse_payload(chunk: str) -> dict[str, Any] | None:
+    for line in chunk.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line.removeprefix("data:").strip()
+        if not payload or payload == "[DONE]":
+            return None
+        try:
+            parsed_payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return parsed_payload if isinstance(parsed_payload, dict) else None
+    return None
+
+
+async def _collect_completion_text(completion: CustomChatCompletion) -> tuple[str, str]:
+    text_parts = []
+    error_message = ""
+
+    async for chunk in completion.do_complete():
+        payload = _parse_sse_payload(chunk)
+        if not payload:
+            continue
+
+        if payload.get("code", 0) != 0:
+            error_message = str(payload.get("message") or "A2A agent execution failed")
+            break
+
+        for choice in payload.get("choices", []):
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if content:
+                text_parts.append(str(content))
+
+    return "".join(text_parts), error_message
+
+
+@a2a_router.post(  # type: ignore[misc]
+    "/message:send",
+    response_model=A2ASendMessageResponse,
+)
+async def send_message(
+    x_consumer_username: Annotated[str, Header()],
+    request: A2ASendMessageRequest,
+) -> A2ASendMessageResponse:
+    """Map an A2A text message onto the existing core agent completion runner."""
+
+    text = extract_message_text(request.message)
+    if request.configuration.return_immediately:
+        return _stored_response(_task_response(request, "TASK_STATE_SUBMITTED"))
+
+    completion_inputs = _completion_inputs_from_a2a(request, text)
+    span = Span(app_id=x_consumer_username, uid=completion_inputs.uid)
+    completion = CustomChatCompletion(
+        app_id=x_consumer_username,
+        inputs=completion_inputs,
+        log_caller=completion_inputs.meta_data.caller,
+        span=span,
+        bot_id="",
+        uid=completion_inputs.uid,
+        question=text,
+    )
+    output_text, error_message = await _collect_completion_text(completion)
+
+    if error_message:
+        return _stored_response(
+            _task_response(
+                request,
+                "TASK_STATE_FAILED",
+                error_text=error_message,
+            )
+        )
+
+    return _stored_response(
+        _task_response(request, "TASK_STATE_COMPLETED", output_text=output_text)
+    )
+
+
 @a2a_router.post(  # type: ignore[misc]
     "/tasks:send",
     response_model=A2ATask,
@@ -233,17 +445,21 @@ async def send_task(
     x_consumer_username: Annotated[str, Header()],
     params: A2ATaskSendParams,
 ) -> A2ATask:
-    """Record a task-oriented A2A request in the core agent runtime store."""
+    """Run a task-oriented A2A request through the core agent runtime."""
 
-    task = _submitted_task_from_params(
-        params.model_copy(
-            update={
-                "tenant": params.tenant or x_consumer_username,
-            }
-        )
+    response = await send_message(
+        x_consumer_username=x_consumer_username,
+        request=_request_from_task_send_params(
+            params.model_copy(
+                update={
+                    "tenant": params.tenant or x_consumer_username,
+                }
+            )
+        ),
     )
-    _record_task(task)
-    return task
+    if response.task is None:
+        raise HTTPException(status_code=500, detail="A2A runtime did not create a task")
+    return response.task
 
 
 @a2a_router.get(  # type: ignore[misc]

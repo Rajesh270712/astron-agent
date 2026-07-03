@@ -146,6 +146,17 @@ class A2ASendMessageConfiguration(A2ABaseModel):
     return_immediately: bool = Field(default=False, alias="returnImmediately")
 
 
+class A2ASendMessageRequest(A2ABaseModel):
+    """A2A SendMessage request."""
+
+    tenant: str = ""
+    message: A2AMessage
+    configuration: A2ASendMessageConfiguration = Field(
+        default_factory=A2ASendMessageConfiguration
+    )
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class A2ATaskStatus(A2ABaseModel):
     """A2A task status."""
 
@@ -182,6 +193,13 @@ class A2ATask(A2ABaseModel):
     artifacts: list[A2AArtifact] = Field(default_factory=list)
     history: list[A2AMessage] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2ASendMessageResponse(A2ABaseModel):
+    """A2A SendMessage response payload."""
+
+    task: Optional[A2ATask] = None
+    message: Optional[A2AMessage] = None
 
 
 class A2ATaskList(A2ABaseModel):
