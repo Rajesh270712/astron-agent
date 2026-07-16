@@ -59,3 +59,61 @@ def test_agent_card_routes_expose_discovery_metadata(
     assert well_known.status_code == 200
     assert versioned.status_code == 200
     assert well_known.json() == versioned.json()
+
+
+def test_tasks_send_get_list_and_events() -> None:
+    """Task runtime endpoints should record and expose submitted task state."""
+    a2a._TASKS.clear()
+    a2a._TASK_EVENTS.clear()
+
+    app = FastAPI()
+    app.include_router(a2a.a2a_router, prefix="/agent/v1")
+    client = TestClient(app)
+    payload = {
+        "id": "task-1",
+        "message": {
+            "messageId": "msg-1",
+            "contextId": "ctx-1",
+            "role": "ROLE_USER",
+            "parts": [{"text": "Run this task."}],
+        },
+    }
+
+    send_response = client.post(
+        "/agent/v1/a2a/tasks:send",
+        headers={"x-consumer-username": "tenant-1"},
+        json=payload,
+    )
+
+    assert send_response.status_code == 200
+    task = send_response.json()
+    assert task["id"] == "task-1"
+    assert task["contextId"] == "ctx-1"
+    assert task["status"]["state"] == "TASK_STATE_SUBMITTED"
+
+    list_response = client.get(
+        "/agent/v1/a2a/tasks",
+        headers={"x-consumer-username": "tenant-1"},
+    )
+
+    assert list_response.status_code == 200
+    assert list_response.json()["tasks"] == [task]
+
+    get_response = client.get(
+        "/agent/v1/a2a/tasks/task-1?historyLength=0",
+        headers={"x-consumer-username": "tenant-1"},
+    )
+
+    assert get_response.status_code == 200
+    assert get_response.json()["history"] == []
+
+    events_response = client.get(
+        "/agent/v1/a2a/tasks/task-1/events",
+        headers={"x-consumer-username": "tenant-1"},
+    )
+
+    assert events_response.status_code == 200
+    events = events_response.json()["events"]
+    assert [event["kind"] for event in events] == ["status-update"]
+    assert events[0]["status"]["state"] == "TASK_STATE_SUBMITTED"
+    assert events[0]["final"] is False

@@ -118,3 +118,120 @@ class A2AAgentCard(A2ABaseModel):
     default_input_modes: list[str] = Field(alias="defaultInputModes")
     default_output_modes: list[str] = Field(alias="defaultOutputModes")
     skills: list[A2AAgentSkill]
+
+
+A2ARole = Literal["ROLE_USER", "ROLE_AGENT", "user", "agent"]
+
+
+class A2AMessage(A2ABaseModel):
+    """A2A message object."""
+
+    message_id: str = Field(alias="messageId")
+    context_id: str = Field(default="", alias="contextId")
+    task_id: str = Field(default="", alias="taskId")
+    role: A2ARole
+    parts: list[A2APart]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    extensions: list[str] = Field(default_factory=list)
+    reference_task_ids: list[str] = Field(
+        default_factory=list, alias="referenceTaskIds"
+    )
+
+
+class A2ASendMessageConfiguration(A2ABaseModel):
+    """Supported subset of A2A SendMessageConfiguration."""
+
+    accepted_output_modes: list[str] = Field(
+        default_factory=list, alias="acceptedOutputModes"
+    )
+    history_length: Optional[int] = Field(default=None, alias="historyLength")
+    return_immediately: bool = Field(default=False, alias="returnImmediately")
+
+
+class A2ATaskStatus(A2ABaseModel):
+    """A2A task status."""
+
+    state: Literal[
+        "TASK_STATE_SUBMITTED",
+        "TASK_STATE_WORKING",
+        "TASK_STATE_COMPLETED",
+        "TASK_STATE_FAILED",
+        "TASK_STATE_CANCELED",
+        "TASK_STATE_INPUT_REQUIRED",
+        "TASK_STATE_REJECTED",
+        "TASK_STATE_AUTH_REQUIRED",
+    ]
+    message: Optional[A2AMessage] = None
+    timestamp: Optional[str] = None
+
+
+class A2AArtifact(A2ABaseModel):
+    """A2A task artifact."""
+
+    artifact_id: str = Field(alias="artifactId")
+    name: str = ""
+    description: str = ""
+    parts: list[A2APart]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2ATask(A2ABaseModel):
+    """A2A task response."""
+
+    id: str
+    context_id: str = Field(alias="contextId")
+    status: A2ATaskStatus
+    artifacts: list[A2AArtifact] = Field(default_factory=list)
+    history: list[A2AMessage] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2ATaskList(A2ABaseModel):
+    """A2A task list response."""
+
+    tasks: list[A2ATask] = Field(default_factory=list)
+
+
+class A2ATaskSendParams(A2ABaseModel):
+    """A2A task send request used by task-oriented HTTP clients."""
+
+    id: str = ""
+    tenant: str = ""
+    session_id: str = Field(default="", alias="sessionId")
+    context_id: str = Field(default="", alias="contextId")
+    message: A2AMessage
+    configuration: A2ASendMessageConfiguration = Field(
+        default_factory=A2ASendMessageConfiguration
+    )
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2ATaskStatusUpdateEvent(A2ABaseModel):
+    """A2A task status update event."""
+
+    task_id: str = Field(alias="taskId")
+    context_id: str = Field(alias="contextId")
+    kind: Literal["status-update"] = "status-update"
+    status: A2ATaskStatus
+    final: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2ATaskArtifactUpdateEvent(A2ABaseModel):
+    """A2A task artifact update event."""
+
+    task_id: str = Field(alias="taskId")
+    context_id: str = Field(alias="contextId")
+    kind: Literal["artifact-update"] = "artifact-update"
+    artifact: A2AArtifact
+    append: bool = False
+    last_chunk: bool = Field(default=True, alias="lastChunk")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2ATaskEvents(A2ABaseModel):
+    """Recorded task runtime events."""
+
+    events: list[A2ATaskStatusUpdateEvent | A2ATaskArtifactUpdateEvent] = Field(
+        default_factory=list
+    )
